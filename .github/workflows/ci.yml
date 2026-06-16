@@ -1,0 +1,54 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    name: Build plugin
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify build artifacts
+        run: |
+          test -f dist/code.js || (echo "Missing dist/code.js" && exit 1)
+          test -f dist/ui.html || (echo "Missing dist/ui.html" && exit 1)
+          test -f dist/manifest.json || (echo "Missing dist/manifest.json" && exit 1)
+          test -f dist/manifest.mastergo.json || (echo "Missing dist/manifest.mastergo.json" && exit 1)
+          node -e "const fs=require('fs'); for (const file of ['manifest.json','manifest.mastergo.json']) { const manifest=JSON.parse(fs.readFileSync('dist/'+file, 'utf8')); for (const entry of [manifest.main, manifest.ui]) { const path='dist/'+entry.replace(/^\\.\\//, ''); if (!fs.existsSync(path)) throw new Error(file+' references missing '+entry); } }"
+          echo "Build artifacts OK"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-build-${{ github.sha }}
+          path: |
+            dist/code.js
+            dist/ui.html
+            dist/manifest.json
+            dist/manifest.mastergo.json
+          retention-days: 14
