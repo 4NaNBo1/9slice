@@ -1,4 +1,13 @@
-import { computeNineSliceRegions, formatSlicePercent, sliceFromPercent, validateSliceSettings, type SliceSettings } from './nine-slice';
+import {
+  computeDefaultSliceSettings,
+  computeNineSliceRegions,
+  formatSlicePercent,
+  sliceFromPercent,
+  validateSliceSettings,
+  type CornerRadii,
+  type RgbaImageData,
+  type SliceSettings,
+} from './nine-slice';
 import {
   dragNumberValue,
   formatCommittedNumberInput,
@@ -26,6 +35,7 @@ interface ImageState {
   bytes: Uint8Array;
   image: HTMLImageElement;
   url: string;
+  defaultSlices: SliceSettings;
   size: {
     width: number;
     height: number;
@@ -75,9 +85,13 @@ window.onmessage = (event: MessageEvent) => {
 async function handlePluginMessage(message: PluginToUiMessage): Promise<void> {
   if (message.type === 'selection-ready') {
     clearImageState();
-    imageState = await decodeImage(message.platform, message.image.layerName, toUint8Array(message.image.bytes));
-    slices = defaultSlices(imageState.size);
-    statusMessage = `Ready: ${message.image.layerName} (${imageState.size.width} x ${imageState.size.height})`;
+    const decodedImage = await decodeImage(message.platform, message.image.layerName, toUint8Array(message.image.bytes));
+    const defaultSlices = defaultSlicesForImage(decodedImage, message.image.cornerRadii);
+    imageState = { ...decodedImage, defaultSlices };
+    slices = message.image.slices ?? defaultSlices;
+    statusMessage = message.image.slices
+      ? `Restored 9-slice settings: ${message.image.layerName} (${imageState.size.width} x ${imageState.size.height})`
+      : `Ready with default slices: ${message.image.layerName} (${imageState.size.width} x ${imageState.size.height})`;
     busy = false;
     render();
     drawPreview();
@@ -532,7 +546,7 @@ function render(): void {
 
   document.getElementById('resetButton')?.addEventListener('click', () => {
     if (!imageState) return;
-    slices = defaultSlices(imageState.size);
+    slices = { ...imageState.defaultSlices };
     statusMessage = validationMessage();
     render();
     drawPreview();
@@ -924,9 +938,32 @@ function previewCursorForGuide(guide: SliceGuide | undefined): string {
   return 'default';
 }
 
-function defaultSlices(size: ImageState['size']): SliceSettings {
-  const value = Math.max(1, Math.min(16, Math.floor(Math.min(size.width, size.height) / 4)));
-  return { top: value, right: value, bottom: value, left: value };
+function defaultSlicesForImage(image: Omit<ImageState, 'defaultSlices'>, cornerRadii: CornerRadii | undefined): SliceSettings {
+  return computeDefaultSliceSettings(image.size, {
+    cornerRadii,
+    alphaData: readImageAlphaData(image.image, image.size),
+  });
+}
+
+function readImageAlphaData(image: HTMLImageElement, size: ImageState['size']): RgbaImageData | undefined {
+  try {
+    const canvas = document.createElement('canvas');
+    canvas.width = size.width;
+    canvas.height = size.height;
+
+    const context = canvas.getContext('2d', { willReadFrequently: true });
+    if (!context) return undefined;
+
+    context.drawImage(image, 0, 0, size.width, size.height);
+    const imageData = context.getImageData(0, 0, size.width, size.height);
+    return {
+      width: imageData.width,
+      height: imageData.height,
+      data: imageData.data,
+    };
+  } catch {
+    return undefined;
+  }
 }
 
 function validationMessage(): string {
@@ -952,7 +989,7 @@ async function checkForUpdate(): Promise<void> {
   }
 }
 
-async function decodeImage(platform: ImageState['platform'], layerName: string, bytes: Uint8Array): Promise<ImageState> {
+async function decodeImage(platform: ImageState['platform'], layerName: string, bytes: Uint8Array): Promise<Omit<ImageState, 'defaultSlices'>> {
   const imageBuffer = bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength) as ArrayBuffer;
   const blob = new Blob([imageBuffer], { type: 'image/png' });
   const url = URL.createObjectURL(blob);

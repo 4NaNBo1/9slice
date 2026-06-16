@@ -1,4 +1,12 @@
-import { computeNineSliceRegions, mapSemanticConstraints } from '../nine-slice';
+import {
+  computeNineSliceRegionsForTarget,
+  inferSliceSettingsFromRegionNodes,
+  mapSemanticConstraints,
+  NINE_SLICE_METADATA_KEY,
+  parseNineSliceMetadata,
+  serializeNineSliceMetadata,
+  type CornerRadii,
+} from '../nine-slice';
 import { getInsertIndexAboveSource } from './layer-order';
 import type { CreateNineSliceOptions, PlatformAdapter, SelectionInfo } from './types';
 
@@ -32,6 +40,10 @@ export class FigmaAdapter implements PlatformAdapter {
     figma.closePlugin();
   }
 
+  commitUndo(): void {
+    figma.commitUndo();
+  }
+
   onMessage(handler: (message: unknown) => void): void {
     figma.ui.onmessage = handler;
   }
@@ -59,10 +71,16 @@ export class FigmaAdapter implements PlatformAdapter {
       throw new Error('Selected layer must have a visible size.');
     }
 
-    const bytes = (await node.exportAsync({ format: 'PNG' })) as Uint8Array;
+    const nineSlice = readNineSliceSelection(node);
+    const cornerRadii = readCornerRadii(node);
+    const fillBytes = await readImageFillBytes(node);
+    const bytes = fillBytes ?? (await exportNodeImage(node));
     return {
       bytes,
       layerName: node.name || 'Image',
+      slices: nineSlice?.slices,
+      isNineSlice: Boolean(nineSlice),
+      ...(cornerRadii ? { cornerRadii } : {}),
       sourceNodeId: node.id,
       layerBounds: {
         x: node.x,
@@ -79,12 +97,20 @@ export class FigmaAdapter implements PlatformAdapter {
       throw new Error('Unable to read the selected layer export.');
     }
 
+    const targetSize = { width: source.width, height: source.height };
     const component = figma.createComponent();
     component.name = options.sourceName;
-    resizeNode(component, options.imageSize.width, options.imageSize.height);
+    resizeNode(component, targetSize.width, targetSize.height);
     component.clipsContent = false;
-    (component as unknown as { fills: unknown[]; strokes: unknown[] }).fills = [createImagePaint(options.sourceBytes, 'FILL')];
+    (component as unknown as { fills: unknown[]; strokes: unknown[] }).fills = [createStoredImagePaint(options.sourceBytes)];
     (component as unknown as { fills: unknown[]; strokes: unknown[] }).strokes = [];
+    component.setPluginData(
+      NINE_SLICE_METADATA_KEY,
+      serializeNineSliceMetadata({
+        imageSize: options.imageSize,
+        slices: options.slices,
+      }),
+    );
 
     const sourceParent = source.parent;
     if (!sourceParent) {
@@ -95,8 +121,12 @@ export class FigmaAdapter implements PlatformAdapter {
     sourceParent.insertChild(insertIndex, component);
     component.relativeTransform = source.relativeTransform;
 
+    const effectSource = effectSourceFor(source, Boolean(options.replaceSource));
+    copyEffects(effectSource, component);
+    copyCornerRadii(effectSource, component);
+
     const piecesByKey = new Map(options.pieces.map((piece) => [piece.key, piece]));
-    for (const region of computeNineSliceRegions(options.imageSize, options.slices)) {
+    for (const region of computeNineSliceRegionsForTarget(options.imageSize, targetSize, options.slices)) {
       if (region.destination.width <= 0 || region.destination.height <= 0) continue;
 
       const piece = piecesByKey.get(region.key);
@@ -113,11 +143,141 @@ export class FigmaAdapter implements PlatformAdapter {
       (rect as unknown as { fills: unknown[]; strokes: unknown[] }).strokes = [];
     }
 
-    resizeNode(component, source.width, source.height);
-    source.visible = false;
+    if (options.replaceSource) {
+      source.remove();
+    } else {
+      source.visible = false;
+    }
     figma.currentPage.selection = [component];
     figma.viewport.scrollAndZoomIntoView([component]);
   }
+}
+
+async function exportNodeImage(node: SceneNode): Promise<Uint8Array> {
+  const effectHost = node as SceneNode & { effects?: ReadonlyArray<unknown> };
+  const effects = Array.isArray(effectHost.effects) ? [...effectHost.effects] : undefined;
+
+  try {
+    if (effects?.length) {
+      (effectHost as { effects: ReadonlyArray<unknown> }).effects = [];
+    }
+    return (await node.exportAsync({ format: 'PNG', useAbsoluteBounds: true })) as Uint8Array;
+  } finally {
+    if (effects) {
+      (effectHost as { effects: ReadonlyArray<unknown> }).effects = effects;
+    }
+  }
+}
+
+function effectSourceFor(source: unknown, allowNestedEffectSource: boolean): unknown {
+  if (hasEffects(source) || !allowNestedEffectSource) return source;
+
+  const children = (source as { children?: unknown }).children;
+  if (!Array.isArray(children)) return source;
+
+  return children.find((child) => (child as { name?: unknown }).name === 'content' && hasEffects(child)) ?? source;
+}
+
+function hasEffects(node: unknown): boolean {
+  const effects = (node as { effects?: unknown }).effects;
+  const effectStyleId = (node as { effectStyleId?: unknown }).effectStyleId;
+  return (Array.isArray(effects) && effects.length > 0) || (typeof effectStyleId === 'string' && effectStyleId.length > 0);
+}
+
+function copyEffects(source: unknown, target: unknown): void {
+  const effects = (source as { effects?: unknown }).effects;
+  if (Array.isArray(effects)) {
+    (target as { effects?: unknown[] }).effects = [...effects];
+  }
+
+  const effectStyleId = (source as { effectStyleId?: unknown }).effectStyleId;
+  if (typeof effectStyleId !== 'string' || !effectStyleId) return;
+
+  try {
+    (target as { effectStyleId?: string }).effectStyleId = effectStyleId;
+  } catch {
+    // Some node/style combinations do not allow assigning effect styles.
+  }
+}
+
+function copyCornerRadii(source: unknown, target: unknown): void {
+  const radii = source as {
+    cornerRadius?: unknown;
+    topLeftRadius?: unknown;
+    topRightRadius?: unknown;
+    bottomLeftRadius?: unknown;
+    bottomRightRadius?: unknown;
+  };
+  const writable = target as {
+    cornerRadius?: unknown;
+    topLeftRadius?: unknown;
+    topRightRadius?: unknown;
+    bottomLeftRadius?: unknown;
+    bottomRightRadius?: unknown;
+  };
+
+  if (typeof radii.cornerRadius === 'number') writable.cornerRadius = radii.cornerRadius;
+  if (typeof radii.topLeftRadius === 'number') writable.topLeftRadius = radii.topLeftRadius;
+  if (typeof radii.topRightRadius === 'number') writable.topRightRadius = radii.topRightRadius;
+  if (typeof radii.bottomLeftRadius === 'number') writable.bottomLeftRadius = radii.bottomLeftRadius;
+  if (typeof radii.bottomRightRadius === 'number') writable.bottomRightRadius = radii.bottomRightRadius;
+}
+
+function readCornerRadii(source: unknown): CornerRadii | undefined {
+  const radii = source as {
+    cornerRadius?: unknown;
+    topLeftRadius?: unknown;
+    topRightRadius?: unknown;
+    bottomLeftRadius?: unknown;
+    bottomRightRadius?: unknown;
+  };
+  const uniform = normalizeCornerRadius(radii.cornerRadius);
+  const cornerRadii = {
+    topLeft: normalizeCornerRadius(radii.topLeftRadius, uniform),
+    topRight: normalizeCornerRadius(radii.topRightRadius, uniform),
+    bottomRight: normalizeCornerRadius(radii.bottomRightRadius, uniform),
+    bottomLeft: normalizeCornerRadius(radii.bottomLeftRadius, uniform),
+  };
+
+  return Object.values(cornerRadii).some((value) => value > 0) ? cornerRadii : undefined;
+}
+
+function normalizeCornerRadius(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value * 10) / 10) : fallback;
+}
+
+function readNineSliceSelection(node: SceneNode & LayoutMixin): { slices: CreateNineSliceOptions['slices'] } | undefined {
+  if ('getPluginData' in node) {
+    const metadata = parseNineSliceMetadata(node.getPluginData(NINE_SLICE_METADATA_KEY));
+    if (metadata) return { slices: metadata.slices };
+  }
+
+  if (!('children' in node)) return undefined;
+
+  const slices = inferSliceSettingsFromRegionNodes(
+    { width: node.width, height: node.height },
+    node.children.map((child) => ({
+      name: child.name,
+      x: child.x,
+      y: child.y,
+      width: child.width,
+      height: child.height,
+    })),
+  );
+  return slices ? { slices } : undefined;
+}
+
+async function readImageFillBytes(node: unknown): Promise<Uint8Array | undefined> {
+  const fills = (node as { fills?: unknown }).fills;
+  if (!Array.isArray(fills)) return undefined;
+
+  const imagePaint = fills.find((paint): paint is FigmaImagePaint => {
+    const candidate = paint as Partial<FigmaImagePaint>;
+    return candidate.type === 'IMAGE' && typeof candidate.imageHash === 'string';
+  });
+  if (!imagePaint) return undefined;
+
+  return (figma.getImageByHash(imagePaint.imageHash) ?? undefined)?.getBytesAsync();
 }
 
 async function getSourceNode(sourceNodeId: string | undefined): Promise<SceneNode & LayoutMixin> {
@@ -154,4 +314,12 @@ function createImagePaint(bytes: Uint8Array, scaleMode: FigmaImagePaint['scaleMo
   }
 
   return paint;
+}
+
+function createStoredImagePaint(bytes: Uint8Array): FigmaImagePaint & { visible: false; opacity: 0 } {
+  return {
+    ...createImagePaint(bytes, 'FILL'),
+    visible: false,
+    opacity: 0,
+  };
 }

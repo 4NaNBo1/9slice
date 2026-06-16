@@ -1,8 +1,11 @@
-import type { RegionKey, Size, SliceSettings } from './nine-slice';
+import type { CornerRadii, RegionKey, Size, SliceSettings } from './nine-slice';
 
 export interface SelectedImagePayload {
   bytes: Uint8Array;
   layerName: string;
+  slices?: SliceSettings;
+  isNineSlice?: boolean;
+  cornerRadii?: CornerRadii;
   sourceNodeId?: string;
   layerBounds?: {
     x: number;

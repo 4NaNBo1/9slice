@@ -56,7 +56,9 @@ async function handleMessage(rawMessage: unknown): Promise<void> {
         sourceNodeId: selectedImage.sourceNodeId,
         sourceBytes: selectedImage.bytes,
         sourceBounds: selectedImage.layerBounds,
+        replaceSource: selectedImage.isNineSlice,
       });
+      platform.commitUndo();
       platform.postMessage({ type: 'create-done', message: '9-slice component created.' });
       platform.notify('9-slice component created.');
     } catch (error) {

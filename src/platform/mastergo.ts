@@ -1,4 +1,12 @@
-import { computeNineSliceRegions, mapSemanticConstraints } from '../nine-slice';
+import {
+  computeNineSliceRegionsForTarget,
+  inferSliceSettingsFromRegionNodes,
+  mapSemanticConstraints,
+  NINE_SLICE_METADATA_KEY,
+  parseNineSliceMetadata,
+  serializeNineSliceMetadata,
+  type CornerRadii,
+} from '../nine-slice';
 import { getInsertIndexAboveSource } from './layer-order';
 import type { CreateNineSliceOptions, PlatformAdapter, SelectionInfo } from './types';
 
@@ -41,6 +49,14 @@ export class MasterGoAdapter implements PlatformAdapter {
     mg.closePlugin();
   }
 
+  commitUndo(): void {
+    try {
+      mg.commitUndo();
+    } catch {
+      // Older/private MasterGo runtimes may not expose commitUndo.
+    }
+  }
+
   onMessage(handler: (message: unknown) => void): void {
     mg.ui.onmessage = handler;
   }
@@ -72,10 +88,16 @@ export class MasterGoAdapter implements PlatformAdapter {
       throw new Error('Selected layer must be exportable and have a visible size.');
     }
 
-    const bytes = await node.exportAsync({ format: 'PNG' });
+    const nineSlice = readNineSliceSelection(node);
+    const cornerRadii = readCornerRadii(node);
+    const fillBytes = await readImageFillBytes(node);
+    const bytes = fillBytes ?? (await exportNodeImage(node));
     return {
       bytes,
       layerName: node.name || 'Image',
+      slices: nineSlice?.slices,
+      isNineSlice: Boolean(nineSlice),
+      ...(cornerRadii ? { cornerRadii } : {}),
       sourceNodeId: node.id,
       layerBounds: {
         x: node.x ?? 0,
@@ -92,11 +114,22 @@ export class MasterGoAdapter implements PlatformAdapter {
       throw new Error('Unable to read the selected layer export.');
     }
 
+    const targetSize = {
+      width: source.width ?? options.sourceBounds?.width ?? options.imageSize.width,
+      height: source.height ?? options.sourceBounds?.height ?? options.imageSize.height,
+    };
     const component = mg.createComponent();
     component.name = options.sourceName;
-    safeResize(component, options.imageSize.width, options.imageSize.height);
-    component.fills = [await createImagePaint(options.sourceBytes)];
+    safeResize(component, targetSize.width, targetSize.height);
+    component.fills = [await createStoredImagePaint(options.sourceBytes)];
     component.strokes = [];
+    component.setPluginData(
+      NINE_SLICE_METADATA_KEY,
+      serializeNineSliceMetadata({
+        imageSize: options.imageSize,
+        slices: options.slices,
+      }),
+    );
     try {
       component.clipsContent = false;
     } catch {
@@ -113,8 +146,12 @@ export class MasterGoAdapter implements PlatformAdapter {
       component.y = source.y ?? 0;
     }
 
+    const effectSource = effectSourceFor(source, Boolean(options.replaceSource));
+    copyEffects(effectSource, component);
+    copyCornerRadii(effectSource, component);
+
     const piecesByKey = new Map(options.pieces.map((piece) => [piece.key, piece]));
-    for (const region of computeNineSliceRegions(options.imageSize, options.slices)) {
+    for (const region of computeNineSliceRegionsForTarget(options.imageSize, targetSize, options.slices)) {
       if (region.destination.width <= 0 || region.destination.height <= 0) continue;
 
       const piece = piecesByKey.get(region.key);
@@ -136,8 +173,11 @@ export class MasterGoAdapter implements PlatformAdapter {
       }
     }
 
-    safeResize(component, source.width ?? options.imageSize.width, source.height ?? options.imageSize.height);
-    source.visible = false;
+    if (options.replaceSource && typeof source.remove === 'function') {
+      source.remove();
+    } else {
+      source.isVisible = false;
+    }
     mg.document.currentPage.selection = [component];
     try {
       mg.viewport.scrollAndZoomIntoView([component]);
@@ -145,6 +185,99 @@ export class MasterGoAdapter implements PlatformAdapter {
       // Viewport helper is not present in all MasterGo plugin runtimes.
     }
   }
+}
+
+async function exportNodeImage(node: any): Promise<Uint8Array> {
+  const effects = Array.isArray(node.effects) ? [...node.effects] : undefined;
+
+  try {
+    if (effects?.length) {
+      node.effects = [];
+    }
+    return node.exportAsync({ format: 'PNG', useAbsoluteBounds: true, useRenderBounds: false });
+  } finally {
+    if (effects) {
+      node.effects = effects;
+    }
+  }
+}
+
+function effectSourceFor(source: any, allowNestedEffectSource: boolean): any {
+  if (hasEffects(source) || !allowNestedEffectSource || !Array.isArray(source.children)) return source;
+
+  return source.children.find((child: any) => child?.name === 'content' && hasEffects(child)) ?? source;
+}
+
+function hasEffects(node: any): boolean {
+  return (Array.isArray(node?.effects) && node.effects.length > 0) || (typeof node?.effectStyleId === 'string' && node.effectStyleId.length > 0);
+}
+
+function copyEffects(source: any, target: any): void {
+  if (Array.isArray(source.effects)) {
+    target.effects = [...source.effects];
+  }
+
+  if (typeof source.effectStyleId !== 'string' || !source.effectStyleId) return;
+
+  try {
+    target.effectStyleId = source.effectStyleId;
+  } catch {
+    // MasterGo effect style assignment support varies by runtime.
+  }
+}
+
+function copyCornerRadii(source: any, target: any): void {
+  if (typeof source?.cornerRadius === 'number') target.cornerRadius = source.cornerRadius;
+  if (typeof source?.topLeftRadius === 'number') target.topLeftRadius = source.topLeftRadius;
+  if (typeof source?.topRightRadius === 'number') target.topRightRadius = source.topRightRadius;
+  if (typeof source?.bottomLeftRadius === 'number') target.bottomLeftRadius = source.bottomLeftRadius;
+  if (typeof source?.bottomRightRadius === 'number') target.bottomRightRadius = source.bottomRightRadius;
+}
+
+function readCornerRadii(source: any): CornerRadii | undefined {
+  const uniform = normalizeCornerRadius(source?.cornerRadius);
+  const cornerRadii = {
+    topLeft: normalizeCornerRadius(source?.topLeftRadius, uniform),
+    topRight: normalizeCornerRadius(source?.topRightRadius, uniform),
+    bottomRight: normalizeCornerRadius(source?.bottomRightRadius, uniform),
+    bottomLeft: normalizeCornerRadius(source?.bottomLeftRadius, uniform),
+  };
+
+  return Object.values(cornerRadii).some((value) => value > 0) ? cornerRadii : undefined;
+}
+
+function normalizeCornerRadius(value: unknown, fallback = 0): number {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.max(0, Math.round(value * 10) / 10) : fallback;
+}
+
+function readNineSliceSelection(node: any): { slices: CreateNineSliceOptions['slices'] } | undefined {
+  if (typeof node.getPluginData === 'function') {
+    const metadata = parseNineSliceMetadata(node.getPluginData(NINE_SLICE_METADATA_KEY));
+    if (metadata) return { slices: metadata.slices };
+  }
+
+  if (!Array.isArray(node.children)) return undefined;
+
+  const slices = inferSliceSettingsFromRegionNodes(
+    { width: node.width ?? 0, height: node.height ?? 0 },
+    node.children.map((child: any) => ({
+      name: child.name,
+      x: child.x ?? 0,
+      y: child.y ?? 0,
+      width: child.width ?? 0,
+      height: child.height ?? 0,
+    })),
+  );
+  return slices ? { slices } : undefined;
+}
+
+async function readImageFillBytes(node: any): Promise<Uint8Array | undefined> {
+  if (!Array.isArray(node.fills)) return undefined;
+
+  const imagePaint = node.fills.find((paint: any) => paint?.type === 'IMAGE' && typeof paint.imageRef === 'string');
+  if (!imagePaint || typeof mg.getImageByHref !== 'function') return undefined;
+
+  return mg.getImageByHref(imagePaint.imageRef)?.getBytesAsync();
 }
 
 function getSourceNode(sourceNodeId: string | undefined): any {
@@ -169,5 +302,13 @@ async function createImagePaint(bytes: Uint8Array): Promise<any> {
     isVisible: true,
     alpha: 1,
     blendMode: 'NORMAL',
+  };
+}
+
+async function createStoredImagePaint(bytes: Uint8Array): Promise<any> {
+  return {
+    ...(await createImagePaint(bytes)),
+    isVisible: false,
+    alpha: 0,
   };
 }

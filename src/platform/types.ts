@@ -9,6 +9,7 @@ export interface CreateNineSliceOptions {
   sourceNodeId?: string;
   sourceBytes?: Uint8Array;
   sourceBounds?: SelectedImagePayload['layerBounds'];
+  replaceSource?: boolean;
 }
 
 export interface SelectionInfo {
@@ -27,4 +28,5 @@ export interface PlatformAdapter {
   getSelectionInfo(): SelectionInfo;
   readSelectedImage(): Promise<SelectedImagePayload>;
   createNineSliceComponent(options: CreateNineSliceOptions): Promise<void>;
+  commitUndo(): void;
 }
