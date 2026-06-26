@@ -68,6 +68,14 @@ node .cursor/skills/sync-rules/scripts/generate.mjs
 
 会生成 `.cursor/rules/*.mdc`。
 
+## 版本历史
+
+| 版本 | 说明 |
+| --- | --- |
+| [v1.0.2](releases/v1.0.2.md) | 正方形自适应预览区，`ResizeObserver` 动态重绘 |
+| [v1.0.1](releases/v1.0.1.md) | 默认切片策略、元数据读写与平台适配改进 |
+| [v1.0.0](releases/v1.0.0.md) | 首次公开发布，Figma / MasterGo 双平台九宫缩放 |
+
 ## 已知限制
 
 - Figma 与 MasterGo 都没有原生 `border-image` 式九宫缩放属性，本插件通过 9 个图片矩形和约束模拟。

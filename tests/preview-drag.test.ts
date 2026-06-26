@@ -46,6 +46,19 @@ describe('computePreviewMetrics', () => {
       canvasHeight: 182,
     });
   });
+
+  it('fits extreme aspect ratios within a square max size', () => {
+    const maxSize = { width: 220, height: 220 };
+    const padding = 12;
+
+    const wide = computePreviewMetrics({ width: 2000, height: 50 }, maxSize, padding);
+    expect(wide.canvasWidth).toBeLessThanOrEqual(maxSize.width);
+    expect(wide.canvasHeight).toBeLessThanOrEqual(maxSize.height);
+
+    const tall = computePreviewMetrics({ width: 50, height: 2000 }, maxSize, padding);
+    expect(tall.canvasWidth).toBeLessThanOrEqual(maxSize.width);
+    expect(tall.canvasHeight).toBeLessThanOrEqual(maxSize.height);
+  });
 });
 
 describe('getExtendedGuideLines', () => {

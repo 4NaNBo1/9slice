@@ -22,6 +22,7 @@ import {
   getSliceGuideAtPoint,
   updateSliceFromGuide,
   type ImagePoint,
+  type PreviewMaxSize,
   type SliceGuide,
 } from './preview-drag';
 import { latestReleaseUrl, shouldShowUpdate, type ReleaseUpdate } from './plugin-metadata';
@@ -54,7 +55,7 @@ interface NumberDragState {
   dragged: boolean;
 }
 
-const PREVIEW_MAX_SIZE = { width: 340, height: 250 };
+const PREVIEW_FALLBACK_MAX_SIZE: PreviewMaxSize = { width: 220, height: 220 };
 const PREVIEW_GUIDE_EXTENSION_PX = 10;
 const PREVIEW_GUIDE_ARROW_SIZE_PX = 8;
 const PREVIEW_GUIDE_ARROW_GAP_PX = 4;
@@ -71,6 +72,7 @@ let busy = false;
 let activeGuide: SliceGuide | undefined;
 let activeNumberDrag: NumberDragState | undefined;
 let availableUpdate: ReleaseUpdate | undefined;
+let previewResizeObserver: ResizeObserver | undefined;
 
 render();
 postToPlugin({ type: 'refresh-selection' });
@@ -231,10 +233,13 @@ function render(): void {
       }
 
       .preview {
-        height: clamp(132px, 40vh, 188px);
+        width: min(100%, 240px);
+        aspect-ratio: 1;
+        margin: 0 auto;
         display: grid;
         place-items: center;
         padding: 10px;
+        overflow: hidden;
         background:
           linear-gradient(45deg, rgba(148, 163, 184, 0.16) 25%, transparent 25%),
           linear-gradient(-45deg, rgba(148, 163, 184, 0.16) 25%, transparent 25%),
@@ -246,8 +251,11 @@ function render(): void {
       }
 
       canvas {
+        display: block;
         max-width: 100%;
         max-height: 100%;
+        width: auto;
+        height: auto;
         border-radius: 12px;
         image-rendering: pixelated;
         filter: drop-shadow(0 20px 30px rgba(0, 0, 0, 0.34));
@@ -572,6 +580,7 @@ function render(): void {
   });
 
   attachPreviewDragHandlers();
+  attachPreviewResizeObserver();
 }
 
 function sliceInput(key: keyof SliceSettings, label: string): string {
@@ -669,7 +678,7 @@ function drawPreview(): void {
   const canvas = document.getElementById('previewCanvas') as HTMLCanvasElement | null;
   if (!canvas) return;
 
-  const metrics = computePreviewMetrics(imageState.size, PREVIEW_MAX_SIZE, PREVIEW_GUIDE_PADDING);
+  const metrics = computePreviewMetrics(imageState.size, getPreviewMaxSize(), PREVIEW_GUIDE_PADDING);
   canvas.width = metrics.canvasWidth;
   canvas.height = metrics.canvasHeight;
 
@@ -721,6 +730,37 @@ function drawGuideArrowhead(context: CanvasRenderingContext2D, points: [ImagePoi
   context.lineTo(points[2].x, points[2].y);
   context.closePath();
   context.fill();
+}
+
+function getPreviewMaxSize(): PreviewMaxSize {
+  const preview = document.querySelector('.preview');
+  if (!(preview instanceof HTMLElement)) {
+    return PREVIEW_FALLBACK_MAX_SIZE;
+  }
+
+  const style = getComputedStyle(preview);
+  const paddingX = parseFloat(style.paddingLeft) + parseFloat(style.paddingRight);
+  const paddingY = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+  const width = Math.max(1, preview.clientWidth - paddingX);
+  const height = Math.max(1, preview.clientHeight - paddingY);
+  if (width <= 0 || height <= 0) {
+    return PREVIEW_FALLBACK_MAX_SIZE;
+  }
+
+  return { width, height };
+}
+
+function attachPreviewResizeObserver(): void {
+  previewResizeObserver?.disconnect();
+  previewResizeObserver = undefined;
+
+  const preview = document.querySelector('.preview');
+  if (!(preview instanceof HTMLElement) || !imageState) return;
+
+  previewResizeObserver = new ResizeObserver(() => {
+    drawPreview();
+  });
+  previewResizeObserver.observe(preview);
 }
 
 function attachPreviewDragHandlers(): void {
@@ -916,7 +956,7 @@ function canvasPointToImagePoint(canvas: HTMLCanvasElement, event: PointerEvent)
   if (!imageState) return { x: 0, y: 0 };
 
   const rect = canvas.getBoundingClientRect();
-  const metrics = computePreviewMetrics(imageState.size, PREVIEW_MAX_SIZE, PREVIEW_GUIDE_PADDING);
+  const metrics = computePreviewMetrics(imageState.size, getPreviewMaxSize(), PREVIEW_GUIDE_PADDING);
   const canvasX = ((event.clientX - rect.left) / rect.width) * canvas.width;
   const canvasY = ((event.clientY - rect.top) / rect.height) * canvas.height;
   return {
@@ -928,7 +968,7 @@ function canvasPointToImagePoint(canvas: HTMLCanvasElement, event: PointerEvent)
 function guideHitTolerance(): number {
   if (!imageState) return 0;
 
-  const metrics = computePreviewMetrics(imageState.size, PREVIEW_MAX_SIZE, PREVIEW_GUIDE_PADDING);
+  const metrics = computePreviewMetrics(imageState.size, getPreviewMaxSize(), PREVIEW_GUIDE_PADDING);
   return 8 / metrics.scale;
 }
 
