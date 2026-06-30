@@ -7,6 +7,7 @@ import {
   serializeNineSliceMetadata,
   type CornerRadii,
 } from '../nine-slice';
+import { readNineSliceMetadataFromNode } from '../psd-nine-slice-bridge';
 import { getInsertIndexAboveSource } from './layer-order';
 import type { CreateNineSliceOptions, PlatformAdapter, SelectionInfo } from './types';
 
@@ -92,11 +93,12 @@ export class MasterGoAdapter implements PlatformAdapter {
     const cornerRadii = readCornerRadii(node);
     const fillBytes = await readImageFillBytes(node);
     const bytes = fillBytes ?? (await exportNodeImage(node));
+    const metadata = readNineSliceMetadataFromNode(node);
     return {
       bytes,
       layerName: node.name || 'Image',
       slices: nineSlice?.slices,
-      isNineSlice: Boolean(nineSlice),
+      isNineSlice: Boolean(nineSlice || metadata),
       ...(cornerRadii ? { cornerRadii } : {}),
       sourceNodeId: node.id,
       layerBounds: {
@@ -251,10 +253,8 @@ function normalizeCornerRadius(value: unknown, fallback = 0): number {
 }
 
 function readNineSliceSelection(node: any): { slices: CreateNineSliceOptions['slices'] } | undefined {
-  if (typeof node.getPluginData === 'function') {
-    const metadata = parseNineSliceMetadata(node.getPluginData(NINE_SLICE_METADATA_KEY));
-    if (metadata) return { slices: metadata.slices };
-  }
+  const metadata = readNineSliceMetadataFromNode(node);
+  if (metadata) return { slices: metadata.slices };
 
   if (!Array.isArray(node.children)) return undefined;
 
