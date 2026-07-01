@@ -90,7 +90,7 @@ async function handlePluginMessage(message: PluginToUiMessage): Promise<void> {
     const decodedImage = await decodeImage(message.platform, message.image.layerName, toUint8Array(message.image.bytes));
     const defaultSlices = defaultSlicesForImage(decodedImage, message.image.cornerRadii);
     imageState = { ...decodedImage, defaultSlices };
-    slices = message.image.slices ?? defaultSlices;
+    slices = scaleSlicesForLayerImage(message.image.slices, message.image.imageSize, imageState.size) ?? defaultSlices;
     statusMessage = message.image.slices
       ? `Restored 9-slice settings: ${message.image.layerName} (${imageState.size.width} x ${imageState.size.height})`
       : `Ready with default slices: ${message.image.layerName} (${imageState.size.width} x ${imageState.size.height})`;
@@ -976,6 +976,25 @@ function previewCursorForGuide(guide: SliceGuide | undefined): string {
   if (guide === 'left' || guide === 'right') return 'ew-resize';
   if (guide === 'top' || guide === 'bottom') return 'ns-resize';
   return 'default';
+}
+
+function scaleSlicesForLayerImage(
+  slices: SliceSettings | undefined,
+  metadataSize: { width: number; height: number } | undefined,
+  layerSize: { width: number; height: number },
+): SliceSettings | undefined {
+  if (!slices) return undefined;
+  if (!metadataSize || metadataSize.width <= 0 || metadataSize.height <= 0) return slices;
+  if (metadataSize.width === layerSize.width && metadataSize.height === layerSize.height) return slices;
+  const sx = layerSize.width / metadataSize.width;
+  const sy = layerSize.height / metadataSize.height;
+  const round = (value: number) => Math.round(value * 10) / 10;
+  return {
+    top: round(slices.top * sy),
+    right: round(slices.right * sx),
+    bottom: round(slices.bottom * sy),
+    left: round(slices.left * sx),
+  };
 }
 
 function defaultSlicesForImage(image: Omit<ImageState, 'defaultSlices'>, cornerRadii: CornerRadii | undefined): SliceSettings {

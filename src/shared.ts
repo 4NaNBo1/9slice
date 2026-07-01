@@ -4,6 +4,8 @@ export interface SelectedImagePayload {
   bytes: Uint8Array;
   layerName: string;
   slices?: SliceSettings;
+  /** 九宫元数据中的原图尺寸（可与当前图层 export 尺寸不同，如 PSD 导入层）。 */
+  imageSize?: Size;
   isNineSlice?: boolean;
   cornerRadii?: CornerRadii;
   sourceNodeId?: string;

@@ -97,7 +97,8 @@ export class MasterGoAdapter implements PlatformAdapter {
     return {
       bytes,
       layerName: node.name || 'Image',
-      slices: nineSlice?.slices,
+      slices: nineSlice?.slices ?? metadata?.slices,
+      imageSize: metadata?.imageSize,
       isNineSlice: Boolean(nineSlice || metadata),
       ...(cornerRadii ? { cornerRadii } : {}),
       sourceNodeId: node.id,
